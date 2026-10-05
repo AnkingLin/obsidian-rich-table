@@ -18,9 +18,9 @@ import { takeSelectedCell } from './renderSelectionHandoff';
 import { cellEffectiveStyle } from './renderCellStyle';
 import { copyRangeToClipboard, copyRangeAsMarkdown, parseHtmlTableWithMerges, parseMarkdownPipeTable } from './renderClipboard';
 import { enterLineEdit } from './renderEditMode';
-import { colMinWidth } from './renderAutofit';
+import { colMinWidth, autoFitAllColWidths } from './renderAutofit';
 import { setupColResize, bindResizeHandle } from './renderResize';
-import { selectorAxisOffset, computeVisibleGeom as computeVisibleGeomPure, type VisibleGeom } from './renderGeometry';
+import { selectorAxisOffset, computeVisibleGeom as computeVisibleGeomPure, applyAutoTableWidthCap, availableTableWidth, type VisibleGeom } from './renderGeometry';
 import { applyZoom, zoomFactor, renderZoomControl } from './renderZoom';
 import { bindScrollSync } from './renderScrollSync';
 import { type CellOpEntry, openCellPanel, buildAlignCellOp } from './renderPanel';
@@ -794,6 +794,15 @@ export async function renderTable(
 		// table-layout/width are standard properties that must override the stylesheet.
 		table.setAttribute('style', `table-layout:fixed;width:${totalWidth}px`);
 		if (onToggleLock) root.setCssProps({ '--bt-lock-table-w': `${totalWidth}px` });
+	} else {
+		// Auto layout: no column has a width of its own, so every column is sized
+		// from its content — and a cell's content max-content is its whole
+		// paragraph on ONE line (unbounded for prose, which is what made an
+		// auto-fit-all table render a 13128px column in a 1240px pane; see
+		// styles.css's .bt-table-auto rule for the cap this class turns on).
+		// Marked here, at the same moment the fixed-layout branch above decides
+		// the table's layout, so the two can never disagree.
+		table.addClass('bt-table-auto');
 	}
 
 	// ── Drag-to-select for cell merging ──────────────────────────────────────
@@ -1853,6 +1862,14 @@ export async function renderTable(
 	// permanent shape, not a dismissable editing cue, so it stays accurate
 	// regardless of lock state.
 	updateOuterFrame = () => {
+		// Re-cap every auto table at the width the view currently offers it (see
+		// applyAutoTableWidthCap's own doc comment). This is the one function that
+		// already re-runs on EVERY geometry change — hover (root's own
+		// padding-left/right reservation), a window/pane resize, a live zoom tick,
+		// a manual view size — so an auto table's cap can never go stale while its
+		// available width moves. It reads root's own clientWidth, which does not
+		// depend on the table's width, so this can't feed back into itself.
+		applyAutoTableWidthCap(root);
 		const rr = root.getBoundingClientRect();
 		if (rr.width === 0) return;
 		const shellRect = shell.getBoundingClientRect();
@@ -2351,15 +2368,51 @@ export async function renderTable(
 			});
 			setIcon(autoFitBtn, 'maximize-2');
 			autoFitBtn.addEventListener('click', () => {
-				// Clears every visible column's own width rather than computing and
-				// writing a specific number — same reasoning as the per-column
-				// dblclick handler (renderResize.ts): an auto column tracks its own
-				// content on every render from here on (applyAutoColWidths, called
-				// post-render from tableBlock.ts), not just at the moment of this click.
-				for (const { colIdx } of visibleCols) {
-					const col = model.columns[colIdx];
-					if (!col) continue;
-					void onStructuralOp({ type: 'set-col-width', colId: col.id, width: 0 });
+				// Sizes every visible column from the VIEW's width rather than from
+				// its own content, whenever the content wouldn't fit. Content-based
+				// fitting is unbounded for prose — a cell's max-content is its whole
+				// paragraph on ONE line, and Chinese has no spaces to break on — so
+				// this button used to clear every width back to auto, which handed
+				// the layout to exactly that unbounded measurement: a 936-char
+				// Chinese paragraph rendered a 13128px column inside a 1240px pane,
+				// reported from a real vault as a 98942px column with the pane
+				// showing one mostly-empty column and no column names ("自动调整列宽
+				// 应当基于视图宽度而不是内容").
+				//
+				// So: measure each column's own fit first (autoFitAllColWidths),
+				// which keeps a table whose content genuinely fits hugging its
+				// content — a narrow table is unaffected, and a column with a type
+				// icon still fits wider than an identical untyped one — and fall
+				// back to an EQUAL SHARE of the view width for every column as soon
+				// as the fitted total would exceed it. Equal shares, not
+				// content-proportional ones: the browser's own auto layout hands
+				// the space to whichever column has the largest max-content, which
+				// for prose means one column takes the whole view and every other
+				// column is crushed to its minimum. Committing real px widths (as
+				// opposed to clearing them, which is what this button used to do)
+				// also leaves the table in fixed layout, where no column can be
+				// re-inflated by its content again.
+				const hiddenCount = model.columns.filter(c => c?.hidden).length;
+				const available = availableTableWidth(root) - hiddenCount * HIDDEN_COL_WIDTH;
+				const n = visibleCols.length;
+				if (n > 0) {
+					const fitted = autoFitAllColWidths(
+						table,
+						visibleCols.map(({ colIdx }) => ({ colIdx, minW: colMinWidth() })),
+						zoom,
+					);
+					let fittedTotal = 0;
+					for (const w of fitted.values()) fittedTotal += w;
+					const share = Math.max(colMinWidth(), Math.floor(available / n));
+					const useViewWidth = !(available > 0) || fittedTotal <= 0 || fittedTotal > available;
+					for (const { colIdx } of visibleCols) {
+						const col = model.columns[colIdx];
+						if (!col) continue;
+						const width = useViewWidth
+							? share
+							: Math.max(colMinWidth(), Math.round(fitted.get(colIdx) ?? colMinWidth()));
+						void onStructuralOp({ type: 'set-col-width', colId: col.id, width });
+					}
 				}
 				for (const row of model.rows) {
 					void onStructuralOp({ type: 'set-row-height', rowId: row.id, height: 0 });
@@ -2747,12 +2800,24 @@ export async function renderTable(
 		const measuredColWidth = new Map<number, number>();
 
 		// The width every strip/handle position in rebuild() is computed from.
-		// Auto layout: this layout's own measurement (see autoPinTotal above) —
-		// NOT <col>'s style width, which is only a one-time snapshot and would
-		// put the letters/seams where the table used to be. Explicit/fixed
-		// layout: <col>'s style width, set at render time (renderer.ts's colgroup
-		// build, or applyAutoColWidths for a col[data-auto] in a mixed table).
+		// Measured LIVE, from the column's own box: this is the width the current
+		// layout is actually rendering the column at, which is what the letters,
+		// grips and resize seams have to line up with. <col>'s style width is only
+		// what was last WRITTEN — rebuild's pin is a one-time snapshot (see
+		// autoPinTotal above), and a theme/Obsidian width rule can size the table
+		// without the pin ever taking effect, so reading it back puts the seams
+		// where the table used to be, or never was (measured on a 3-column table
+		// with a `width:100% !important` rule: pinned 102.55px vs a rendered
+		// 108.63px column — every handle 6px off its own seam). Chromium gives
+		// <col> a real rect (selectorAxisOffset below already reads its left edge
+		// the same way); a zero-width box — an engine that doesn't, or a detached/
+		// cloned tree — falls through to the last rebuild's own measurement and
+		// then to the style width, which is also the whole answer for an explicit/
+		// fixed-layout table (applyAutoColWidths pins every col[data-auto] at
+		// render time; measuredColWidth stays empty for it).
 		const colWidthForLayout = (colEl: HTMLElement): number => {
+			const rendered = colEl.getBoundingClientRect().width / zoom;
+			if (rendered > 0) return rendered;
 			const ci = colEl.dataset.col;
 			if (ci !== undefined) {
 				const measured = measuredColWidth.get(parseInt(ci));

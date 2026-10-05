@@ -92,7 +92,24 @@ export function setupColResize(
 
 		const startX = e.clientX;
 		const MIN    = colMinWidth();
-		const startW = parseInt(thisCol.style.width) || col.width || MIN;
+		// Read the column's RENDERED width at drag time, not <col>'s style width —
+		// same "measure at drag time" shape as bindResizeHandle's own
+		// anchor.offsetHeight for rows. The style width is whatever was last
+		// written: renderer.ts's rebuild() pins an auto-layout table's widths once
+		// and never rewrites them (see its autoPinTotal note), and a theme width
+		// declaration, the table's own border/padding or a content-forced minimum
+		// can all make the rendered column differ from that pin. Anchoring to the
+		// pin instead made the first pointermove jump the column by that
+		// difference, and the committed width disagree with what the user dragged
+		// (measured: a 40px drag committed 142px for a column rendering 108.6px,
+		// i.e. off by the 6px of pin-vs-render difference). Rounded to a whole
+		// pixel for the same reason the committed width below is — see this
+		// handler's own note on fractional pointer deltas. getBoundingClientRect()
+		// is visual while every operand below (style width, MIN, the committed
+		// width) is logical, so the measurement goes through / zoom — same
+		// correction this handler's own onMove applies to the pointer delta.
+		const startW = Math.round(thisCol.getBoundingClientRect().width / zoom)
+			|| parseInt(thisCol.style.width) || col.width || MIN;
 
 		if (colLine) colLine.setCssProps({ '--bt-ri-opacity': '0.75' });
 		else { colLine = makeColLine(); colLine.setCssProps({ '--bt-ri-opacity': '0.75' }); }

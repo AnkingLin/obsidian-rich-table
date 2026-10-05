@@ -66,10 +66,13 @@ test('clicking the type icon is inert — no panel opens, the click falls throug
 });
 
 test("auto-fit includes the type icon's width — a typed and an untyped column with identical text fit to different widths", async ({ page, renderBlock }) => {
-	// renderBlock (not renderFull): auto-fit-all now CLEARS both columns'
-	// widths rather than writing a computed number (see choice-col-reactive-
-	// width's own notes) — the actual size only shows up after the note is
-	// rewritten and reprocessed, which only renderBlock actually does.
+	// renderBlock (not renderFull): auto-fit-all commits the fitted widths, and
+	// what it fitted to only shows up after the note is rewritten and
+	// reprocessed, which only renderBlock actually does. This table's content
+	// FITS the view, which is the branch that keeps fitting to content (a typed
+	// column fits wider than an identical untyped one because of its icon);
+	// content that would overflow the view is fitted from the view width
+	// instead — see renderer.ts's auto-fit handler and prose-column-width.
 	const block = await renderBlock(`---
 version: 2
 columns:
@@ -84,7 +87,8 @@ rows:
 	await page.waitForTimeout(150);
 	await page.locator('.bt-ctrl-btn[aria-label*="Auto-fit"]').first().click();
 
-	await expect.poll(() => block.noteText()).not.toContain('width:');
+	// Both columns get a committed width — the content fit, not a reset to auto.
+	await expect.poll(async () => ((await block.noteText()).match(/width:/g) ?? []).length).toBe(2);
 	await block.reprocess();
 
 	// reprocess() doesn't itself wait for the rebuild to finish — poll on the

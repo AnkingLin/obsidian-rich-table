@@ -169,6 +169,38 @@ export function autoFitAllColWidths(
 	const results = new Map<number, number>();
 	for (const { colIdx, minW } of cols) results.set(colIdx, minW);
 
+	// Nothing may be fitted wider than the VIEW is wide. Every measurement below
+	// is deliberately taken with white-space: nowrap (a column should fit its
+	// content on one line rather than wrap early — that is this codebase's own
+	// auto-width contract, and a column whose content fits on one line must keep
+	// growing to it), and for PROSE that measurement is unbounded: a paragraph's
+	// single-line width grows with its own length, and Chinese has no spaces to
+	// break on at all, so a fitted column came back tens of thousands of px wide
+	// (measured: 936 chars of Chinese prose = 13128px inside a 1240px pane;
+	// reported from a real vault as a 98942px column — "every table ends up with
+	// a huge column width" after auto-fit-all, which is the button that turns
+	// every column auto). Capping at the view width keeps one-line fitting
+	// exactly as it was for everything that actually fits on one line, and lets
+	// content wider than the view wrap the way any other table cell would.
+	//
+	// The reference is the ROOT's content width — the space the table has to
+	// occupy — NOT the wrapper's own clientWidth: the wrapper is `width:
+	// max-content`, so for a table narrower than the view it measures the
+	// table's own current width, and capping against that would freeze every
+	// auto column at the width it already had (breaking the grow-to-fit above,
+	// and clamped a nested table's measured 800px content down to the outer
+	// table's own 50px). × the zoom factor, because root.clientWidth is reported
+	// in the ZOOMED space (827 for a 1240px pane at zoom 150%) while this cap is
+	// in the table's own logical px — the same multiplier styles.css's own cap
+	// applies, so the JS and CSS halves agree at every zoom level and zooming
+	// never changes what a column is fitted to. 0 (a detached or zero-sized
+	// tree, e.g. a snapshot clone) falls back to no cap, the pre-existing
+	// behavior.
+	const rootEl = tbl.closest<HTMLElement>('.bt-render-root');
+	const viewWidth = rootEl && rootEl.clientWidth > 0
+		? rootEl.clientWidth * measureZoomFactor(rootEl)
+		: Infinity;
+
 	const pills:        { colIdx: number; el: HTMLElement }[] = [];
 	const medias:       { colIdx: number; el: HTMLElement }[] = [];
 	const textSpans:    { colIdx: number; el: HTMLElement }[] = [];
@@ -232,7 +264,7 @@ export function autoFitAllColWidths(
 	// computes layout once (lazily, on the first read below) and reuses it for the rest.
 	const view = activeDocument.defaultView;
 	const grow = (colIdx: number, w: number) => {
-		results.set(colIdx, Math.max(results.get(colIdx) ?? 0, w));
+		results.set(colIdx, Math.max(results.get(colIdx) ?? 0, Math.min(w, viewWidth)));
 	};
 	const padBorder = (cell: HTMLElement) => {
 		const style = view ? view.getComputedStyle(cell) : null;
@@ -393,8 +425,31 @@ export function applyCodeLineHeightFix(table: HTMLElement): void {
 	table.style.setProperty('--bt-cell-line-height', `${codeHeight / zoom}px`);
 }
 
-/** A column's right edge, in px offset from the table's own left border edge, summing <col> widths in DOM order. */
+/** A column's right edge, in px offset from the table's own left border edge.
+ *
+ *  MEASURED from the column's own box, not summed from `<col>` style widths: a
+ *  style width is only what was last WRITTEN, which an auto-layout table's
+ *  column can render differently from — renderer.ts's own rebuild() pins those
+ *  widths once (see its autoPinTotal note) and deliberately never rewrites them,
+ *  a theme/Obsidian `width` declaration the pin can't beat in the cascade sizes
+ *  the table anyway, and the table's own border/padding plus any content-forced
+ *  minimum all sit between the two. This value positions the resize handle's
+ *  hover seam, which has to land where the column the user sees actually ends
+ *  (measured on a 3-column table with a `width:100% !important` rule: style sum
+ *  102.55px vs a real 108.63px edge — a handle 6px off its own seam, and a drag
+ *  that moved the rendered column 56px for a 40px pointer delta). Chromium gives
+ *  <col> a real rect (the selector-strip math already reads its left edge the
+ *  same way), so measuring costs one read; falls back to the cumulative style
+ *  sum when there's no box to measure (detached or zero-width table). */
 export function colRightX(tbl: HTMLElement, colIdx: number): number {
+	const tblRect = tbl.getBoundingClientRect();
+	const zoom = measureZoomFactor(tbl);
+	for (const c of ownCols(tbl)) {
+		if (c.dataset.col === undefined || parseInt(c.dataset.col) !== colIdx) continue;
+		const rect = c.getBoundingClientRect();
+		if (rect.width > 0) return (rect.right - tblRect.left) / zoom;
+		break;
+	}
 	let x = 0;
 	for (const c of ownCols(tbl)) {
 		x += parseInt(c.style.width) || 0;

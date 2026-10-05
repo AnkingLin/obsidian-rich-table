@@ -289,11 +289,45 @@
 .bt-table-content-row {
 	display: flex;
 	width: max-content;
+	/* Capped at the view's own width so the row can't be sized by a cell's
+	 * UNBOUNDED max-content. A table cell's max-content is its whole paragraph on
+	 * one line, and Chinese prose has no spaces to break on, so with nothing
+	 * capping this row an auto-layout table rendered the paragraph on one line:
+	 * measured 936 chars of Chinese prose as a 13128px column inside a 1240px
+	 * pane (reported from a real vault: a resize-handle seam at 98942px, and
+	 * "every table ends up with a huge column width" after auto-fit-all, which is
+	 * the button that turns every column auto). The table's own cap below is what
+	 * actually wraps the text; this one is what gives it a definite width to
+	 * resolve against. */
+	max-width: 100%;
 	margin-inline: auto;
 	/* Positioning context for .bt-resize-indicator (see its own comment) —
 	 * doesn't affect this element's own flex layout, since position:relative
 	 * with no offsets keeps it exactly where static flow already placed it. */
 	position: relative;
+}
+/* Auto-layout tables only (renderer.ts adds this class when NO column has an
+ * explicit width — see its colgroup build). A fixed-layout table's inline
+ * `width` is the whole point of a manual column width: capping IT would scale
+ * every explicitly sized column down to the view, which is why the cap is
+ * class-scoped rather than applied to .bt-table outright. For an auto table the
+ * cap is exactly "fit the available width, wrapping text as needed", and a
+ * table whose columns genuinely can't fit (their min-content sum is larger, e.g.
+ * many columns, a nowrap element, a diagram) still exceeds it — tables can't
+ * render below their own minimum — so a wide table still scrolls.
+ *
+ * The cap is a px value JS writes onto root (renderGeometry.ts's
+ * applyAutoTableWidthCap), NOT a percentage: `100%` here would resolve against
+ * .bt-table-content-row's own content-sized width — the very thing the cap
+ * exists to bound — and the resulting shrink instead propagated to the
+ * WRAPPER's width (measured: an explicit-width table at zoom 50% reported a
+ * 100px row for a 200px table, and the status bar, which derives its own box
+ * from the wrapper, came out 83px against the table's 100px). A px cap bounds
+ * the table without touching any of that geometry. JS also multiplies by the
+ * live zoom factor, so the cap stays in the table's own logical px: zooming
+ * changes how big the table looks, never how its columns are laid out. */
+.bt-table-content-row > .bt-table.bt-table-auto {
+	max-width: var(--bt-cap-w, none);
 }
 .bt-table-content-row > .bt-table,
 .bt-table-content-row > .bt-edge-add-col {

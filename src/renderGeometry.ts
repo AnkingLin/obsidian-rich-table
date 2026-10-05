@@ -239,6 +239,45 @@ export function reserveSelectorLeftPad(root: HTMLElement): void {
 }
 
 /**
+ * The width a table inside `root` may occupy, in the table's OWN logical px —
+ * root's content width × the live zoom factor. Root's `clientWidth` is reported
+ * in the zoomed space (827 for a 1240px pane at zoom 150%), so the factor puts
+ * the answer back in the units every width in this codebase is expressed in;
+ * without it, zooming in would re-lay-out (and wrap) a table that fits its
+ * content perfectly well. Shared by the auto-table width cap below and the
+ * auto-fit-all control (renderer.ts), so a fitted table and a capped one always
+ * agree on how much room there is.
+ */
+export function availableTableWidth(root: HTMLElement): number {
+	return root.clientWidth * measureZoomFactor(root);
+}
+
+/**
+ * Caps every AUTO-layout table in `root` at the width the view actually offers
+ * it — styles.css's `.bt-table-content-row > .bt-table.bt-table-auto` rule reads
+ * the `--bt-cap-w` px value this writes.
+ *
+ * Why the cap exists: an auto table's columns are sized from their content, and
+ * a cell's max-content is its whole paragraph on ONE line. For prose that is
+ * unbounded — Chinese has no spaces to break on at all — so an auto table
+ * rendered a paragraph on one line: measured 936 chars of Chinese prose as a
+ * 13128px column inside a 1240px pane, reported from a real vault as a 98942px
+ * column with the pane showing one mostly-empty column and no column names.
+ * Capping at the view width makes content wider than the view wrap like any
+ * other table cell, while `max-width` never raises anything: a narrow table is
+ * untouched, and a table whose columns genuinely cannot fit (min-content sum
+ * larger — many columns, a nowrap element, a diagram) still exceeds the cap,
+ * because tables can't render below their own minimum, so it still scrolls.
+ * Explicit-width tables are deliberately not capped: their inline width is the
+ * whole point of a manual column width, and capping it would scale every
+ * explicitly sized column down.
+ */
+export function applyAutoTableWidthCap(root: HTMLElement): void {
+	const available = availableTableWidth(root);
+	if (available > 0) root.setCssProps({ '--bt-cap-w': `${Math.round(available)}px` });
+}
+
+/**
  * The initial, first-paint counterpart of renderer.ts's own closure-local
  * `updateOuterFrame` — same "must run post-swap, against a genuinely attached
  * tree" reasoning as reserveSelectorLeftPad above, and the same "standalone,
@@ -260,6 +299,7 @@ export function applyOuterFrame(root: HTMLElement): void {
 	const frame = shell?.querySelector<HTMLElement>(':scope > .bt-outer-frame');
 	const wrapper = root.querySelector<HTMLElement>(':scope > .bt-table-wrapper');
 	if (!shell || !frame || !wrapper) return;
+	applyAutoTableWidthCap(root);
 	const rr = root.getBoundingClientRect();
 	if (rr.width === 0) return;
 	const shellRect = shell.getBoundingClientRect();
