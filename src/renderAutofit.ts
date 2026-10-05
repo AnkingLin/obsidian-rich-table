@@ -1,6 +1,6 @@
 import type { StructuralOpHandler } from './renderTypes';
 import { ownCells, ownCols } from './renderOwnScope';
-import { measureZoomFactor } from './renderGeometry';
+import { measureZoomFactor, availableTableWidth } from './renderGeometry';
 
 /**
  * Extra headroom added on top of a choice pill's measured `offsetWidth`. The
@@ -189,17 +189,18 @@ export function autoFitAllColWidths(
 	// table's own current width, and capping against that would freeze every
 	// auto column at the width it already had (breaking the grow-to-fit above,
 	// and clamped a nested table's measured 800px content down to the outer
-	// table's own 50px). × the zoom factor, because root.clientWidth is reported
-	// in the ZOOMED space (827 for a 1240px pane at zoom 150%) while this cap is
-	// in the table's own logical px — the same multiplier styles.css's own cap
-	// applies, so the JS and CSS halves agree at every zoom level and zooming
-	// never changes what a column is fitted to. 0 (a detached or zero-sized
-	// tree, e.g. a snapshot clone) falls back to no cap, the pre-existing
-	// behavior.
+	// table's own 50px). It comes from availableTableWidth, which also takes the
+	// add-column strip's own 18px out first (see its own comment) — that strip is
+	// part of the row, so measuring it into a column is what put a view-filling
+	// table under the strip. That helper applies the zoom factor too, because
+	// root.clientWidth is reported in the ZOOMED space (827 for a 1240px pane at
+	// zoom 150%) while this cap is in the table's own logical px — the same
+	// multiplier styles.css's own cap applies, so the JS and CSS halves agree at
+	// every zoom level and zooming never changes what a column is fitted to. 0 (a
+	// detached or zero-sized tree, e.g. a snapshot clone) falls back to no cap,
+	// the pre-existing behavior.
 	const rootEl = tbl.closest<HTMLElement>('.bt-render-root');
-	const viewWidth = rootEl && rootEl.clientWidth > 0
-		? rootEl.clientWidth * measureZoomFactor(rootEl)
-		: Infinity;
+	const viewWidth = rootEl && rootEl.clientWidth > 0 ? availableTableWidth(rootEl) : Infinity;
 
 	const pills:        { colIdx: number; el: HTMLElement }[] = [];
 	const medias:       { colIdx: number; el: HTMLElement }[] = [];
@@ -354,8 +355,31 @@ export function applyAutoColWidths(table: HTMLElement): void {
 	// element).
 	const zoom = measureZoomFactor(table);
 	const fits = autoFitAllColWidths(table, autoCols.map(c => ({ colIdx: c.colIdx, minW: colMinWidth() })), zoom);
+
+	// The auto columns share only what the view leaves them: after the columns
+	// that already have a width of their own (explicit ones and hidden runs) and
+	// after the add-column strip — see availableTableWidth's own comment for why
+	// that strip has to be part of this arithmetic. Each fitted column used to be
+	// capped at the whole view independently, so `table + strip` came out wider
+	// than the view and the strip, pinned to the wrapper's visible edge by
+	// position:sticky, sat on top of the last column until the table was scrolled
+	// all the way right ("滚动到最右边才和添加按钮不重叠"). Only shrinks when
+	// there is a leftover to share at all: explicit columns already wider than the
+	// view leave none, and those tables scroll by design.
+	const rootEl = table.closest<HTMLElement>('.bt-render-root');
+	const available = rootEl ? availableTableWidth(rootEl) : Infinity;
+	let takenWidth = 0;
+	for (const c of ownCols(table)) {
+		if (c.dataset.col !== undefined && c.dataset.auto) continue;
+		takenWidth += parseInt(c.style.width) || 0;
+	}
+	const budget = available - takenWidth;
+	let fittedTotal = 0;
+	for (const w of fits.values()) fittedTotal += w;
+	const scale = budget > 0 && fittedTotal > budget ? budget / fittedTotal : 1;
 	for (const { colEl, colIdx } of autoCols) {
-		colEl.style.setProperty('width', `${fits.get(colIdx) ?? colMinWidth()}px`);
+		const w = Math.max(colMinWidth(), Math.floor((fits.get(colIdx) ?? colMinWidth()) * scale));
+		colEl.style.setProperty('width', `${w}px`);
 	}
 
 	const totalWidth = Array.from(table.querySelectorAll<HTMLElement>('col'))

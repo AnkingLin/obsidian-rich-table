@@ -2141,7 +2141,17 @@ export async function renderTable(
 		const addRowBtn = wrapper.createDiv({ cls: 'bt-edge-add-row' });
 		addRowBtn.createSpan({ cls: 'bt-edge-plus', text: '+' });
 
-		const addColBtn = contentRow.createDiv({ cls: 'bt-edge-add-col' });
+		// The add-column strip goes on ROOT, not in contentRow: the outermost
+		// layer every other overlay here already lives in (ctrl column, row/col
+		// selectors, view-width handles). Inside the wrapper it was a sticky
+		// in-flow sibling of the table, so a table that reached the wrapper's
+		// visible edge had the strip pulled back on top of its last column
+		// ("滚动到最右边列表才和添加按钮不重叠"), and it shared its pixels with the
+		// view-width handle. Out here it shares the permanently reserved right
+		// lane (--bt-sel-pad-right, applyRightLaneReservation) with that handle as
+		// [table][+ strip][handle][pane edge] — see positionEdgeStrips for the two
+		// coordinates, and .bt-edge-add-col's own CSS for the lane itself.
+		const addColBtn = root.createDiv({ cls: 'bt-edge-add-col' });
 		addColBtn.createSpan({ cls: 'bt-edge-plus', text: '+' });
 
 		isEdgeStripsVisible = () => addRowBtn.hasClass('bt-strip-visible') || addColBtn.hasClass('bt-strip-visible');
@@ -2211,17 +2221,37 @@ export async function renderTable(
 			// scroll a negative table top (tt) is normal (table scrolled up under a
 			// frozen/pinned region), so the old `tt < -5` check wrongly bailed then.
 			if (g.vw <= 0 || g.vh <= 0) return false;
-			// addColBtn needs no JS left/top positioning (sticky handles both — see
-			// the comment at its creation above), but its HEIGHT still comes from
-			// here: g.vh is the clamped visible table height (min of the table's own
-			// height and the wrapper's), which is what gives the sticky box "room to
-			// move" within — see .bt-edge-add-col's own CSS comment for why a taller
-			// (unclamped) height breaks sticky tracking outright. Cheaper than the old
-			// full position computation, and — unlike that one — doesn't need to run
-			// every scroll frame (g.vh is scroll-invariant except at the very first/
-			// last few px of travel), but piggybacking on the existing scroll-driven
-			// call below costs nothing extra.
-			addColBtn.setCssProps({ '--strip-height': `${g.vh}px` });
+			// The add-column strip is a root-level overlay (see its creation), so
+			// its position is computed here rather than left to position:sticky:
+			// x is the table's own right edge in root-relative px, clamped to the
+			// visible right edge for a table wider than the view (so it stays on
+			// screen and sits in the lane instead of over the content), and it
+			// spans the clamped visible table height — the same g.vh the old
+			// sticky box needed as its own height. --ac-right-gap then puts the
+			// view-width handle just outside it, so the two share the reserved
+			// right lane side by side instead of overlapping.
+			const addColW = addColBtn.offsetWidth || 0;
+			let gripW = 0;
+			for (const el of Array.from(root.querySelectorAll<HTMLElement>(':scope > .bt-view-resize-br, :scope > .bt-view-resize-r'))) {
+				gripW = Math.max(gripW, el.offsetWidth || 0);
+			}
+			const laneW = addColW + gripW;
+			const rrLogical = rr.width / zoom;
+			const tableRight = (tr.right - rr.left) / zoom;
+			// Clamped to the LANE's own left edge (root's width minus the lane), not
+			// to the wrapper's visible edge: the lane is outside the wrapper, so a
+			// table that reaches its visible edge can hand the strip straight into
+			// the lane instead of having it overlap the last 20px of the table.
+			const stripX = Math.max(g.vl, Math.min(tableRight, rrLogical - laneW));
+			addColBtn.setCssProps({
+				'--ac-left':   `${stripX}px`,
+				'--ac-top':    `${g.vt}px`,
+				'--ac-height': `${g.vh}px`,
+			});
+			// On ROOT, not on the strip: the view-width handles are the strip's
+			// SIBLINGS (all root children), so a var set on the strip would never
+			// reach them — this is what places them just outside it.
+			root.setCssProps({ '--ac-right-gap': `${Math.max(0, rrLogical - (stripX + laneW))}px` });
 			// addRowBtn needs no JS position math either (sticky handles bottom/
 			// left/right — see its own CSS comment), but its --strip-max-width
 			// does: caps it to contentRow's (table + addColBtn) rendered width so
@@ -2533,13 +2563,31 @@ export async function renderTable(
 			});
 			setIcon(settingsBtn, 'settings-2');
 			settingsBtn.addEventListener('click', (evt: MouseEvent) => {
+				// Unchecking one of these freezes the view at the size it currently
+				// has, rather than doing nothing: the entries only ever committed
+				// `null` (auto), so clicking an already-checked "Auto width"/
+				// "Auto height" was a no-op and the setting could not be turned off
+				// (reported: "勾选自动宽度和自动高度后无法取消"). A manual size that
+				// matches what is on screen is also the only choice that cannot make
+				// the table jump at the moment of the switch. Logical px, divided by
+				// zoom, because that is what --bt-view-width/-height are consumed as.
 				const menu = new Menu();
 				menu.addItem(i => i.setTitle(t('autoWidth')).setIcon('move-horizontal')
 					.setChecked(model.viewWidth === undefined)
-					.onClick(() => void onStructuralOp({ type: 'set-view-width', width: null })));
+					.onClick(() => void onStructuralOp({
+						type: 'set-view-width',
+						width: model.viewWidth === undefined
+							? Math.max(80, Math.round(wrapper.getBoundingClientRect().width / zoom))
+							: null,
+					})));
 				menu.addItem(i => i.setTitle(t('autoHeight')).setIcon('move-vertical')
 					.setChecked(model.viewHeight === undefined)
-					.onClick(() => void onStructuralOp({ type: 'set-view-height', height: null })));
+					.onClick(() => void onStructuralOp({
+						type: 'set-view-height',
+						height: model.viewHeight === undefined
+							? Math.max(60, Math.round(wrapper.getBoundingClientRect().height / zoom))
+							: null,
+					})));
 				// Hidden entirely (not just disabled) on a 2+-sheet workbook — the
 				// bar is forced pinned there regardless of this setting (see
 				// forceStatusBarPinned's own doc comment on renderTable), so toggling

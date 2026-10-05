@@ -239,17 +239,64 @@ export function reserveSelectorLeftPad(root: HTMLElement): void {
 }
 
 /**
- * The width a table inside `root` may occupy, in the table's OWN logical px —
- * root's content width × the live zoom factor. Root's `clientWidth` is reported
- * in the zoomed space (827 for a 1240px pane at zoom 150%), so the factor puts
- * the answer back in the units every width in this codebase is expressed in;
- * without it, zooming in would re-lay-out (and wrap) a table that fits its
- * content perfectly well. Shared by the auto-table width cap below and the
- * auto-fit-all control (renderer.ts), so a fitted table and a capped one always
- * agree on how much room there is.
+ * The width a table inside `root` may occupy, in the table's OWN logical px.
+ *
+ * Two things are taken out of root's box width before the table is handed the
+ * remainder, because both sit inside it and both were making the table overflow
+ * the wrapper it lives in:
+ *
+ *  - Root's own horizontal paddings. clientWidth is the PADDING box, so it still
+ *    contains the lane reserved for the ctrl column + row selector on the left
+ *    (`--bt-sel-pad-left`, ~54px on hover) and the add-column strip + view-width
+ *    handle on the right (`--bt-sel-pad-right`) — a cap computed from clientWidth
+ *    was therefore ~54px too generous exactly while hovering, the row overflowed
+ *    the wrapper's content box, and the strip got dragged back over the last
+ *    column. Both lanes are OUTSIDE the wrapper, so what is left is precisely the
+ *    table's own share of the view.
+ *
+ * × the live zoom factor, because clientWidth is reported in the zoomed space
+ * (827 for a 1240px pane at zoom 150%) while this answer is consumed as a px
+ * width inside the table's logical space — without it, zooming in would
+ * re-lay-out (and wrap) a table that fits its content perfectly well. Shared by
+ * the auto-table width cap below, the auto-fit-all control and the auto-column
+ * fitting pass, so all three always agree on how much room there is.
  */
 export function availableTableWidth(root: HTMLElement): number {
-	return root.clientWidth * measureZoomFactor(root);
+	const padLeft = parseFloat(root.style.getPropertyValue('--bt-sel-pad-left')) || 0;
+	const padRight = parseFloat(root.style.getPropertyValue('--bt-sel-pad-right')) || 0;
+	const contentWidth = Math.max(0, root.clientWidth - padLeft - padRight) * measureZoomFactor(root);
+	return contentWidth;
+}
+
+/**
+ * The right lane's width: the add-column strip plus the view-width handle that
+ * shares the lane with it ([table][+ strip][handle][pane edge]), both read from
+ * the live elements so a theme that resizes either stays correct.
+ */
+function rightLaneWidth(root: HTMLElement): number {
+	const strip = root.querySelector<HTMLElement>(':scope > .bt-edge-add-col');
+	if (!strip) return 0;
+	// The lane holds the strip plus the WIDEST view-resize handle (the corner grip
+	// is wider than the edge one). They share the lane's outer edge, so sizing for
+	// the wider of the two keeps neither able to reach back over the strip.
+	let grip = 0;
+	for (const el of Array.from(root.querySelectorAll<HTMLElement>(':scope > .bt-view-resize-br, :scope > .bt-view-resize-r'))) {
+		grip = Math.max(grip, el.offsetWidth || 0);
+	}
+	return (strip.offsetWidth || 0) + grip;
+}
+
+/**
+ * The add-column strip's own lane, reserved on root exactly like the left side's
+ * (`--bt-sel-pad-left`, which the ctrl column and row selector live in): a
+ * permanent blank column on the right of the wrapper, for every table and at
+ * every scroll position, so the table never runs into the pane's right edge and
+ * the strip is never the thing keeping it off that edge. Wide enough for both
+ * the strip and the view-width handle, which are laid out in it side by side.
+ */
+export function applyRightLaneReservation(root: HTMLElement): void {
+	const lane = rightLaneWidth(root);
+	if (lane > 0) root.setCssProps({ '--bt-sel-pad-right': `${lane}px` });
 }
 
 /**
@@ -273,6 +320,7 @@ export function availableTableWidth(root: HTMLElement): number {
  * explicitly sized column down.
  */
 export function applyAutoTableWidthCap(root: HTMLElement): void {
+	applyRightLaneReservation(root);
 	const available = availableTableWidth(root);
 	if (available > 0) root.setCssProps({ '--bt-cap-w': `${Math.round(available)}px` });
 }

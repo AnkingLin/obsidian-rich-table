@@ -55,20 +55,17 @@ test.describe('outer frame', () => {
 		await page.waitForTimeout(50);
 
 		const wrapperBox = (await page.locator('.bt-table-wrapper').boundingBox())!;
-		const addColBtn = page.locator('.bt-edge-add-col');
-		if (await addColBtn.count() > 0) {
-			const addColBox = (await addColBtn.boundingBox())!;
-			// wrapper must actually be the widest thing here, or this test isn't
-			// exercising the reported scenario at all.
-			expect(wrapperBox.x + wrapperBox.width).toBeGreaterThan(addColBox.x + addColBox.width + 20);
-		}
-
 		const frameBox = (await page.locator('.bt-outer-frame').boundingBox())!;
 		const handleBox = (await page.locator('.bt-view-resize-r').boundingBox())!;
 		const statusBarBox = (await page.locator('.bt-status-bar').boundingBox())!;
 		expect(frameBox.x + frameBox.width).toBeCloseTo(wrapperBox.x + wrapperBox.width, 0);
-		expect(handleBox.x + handleBox.width).toBeCloseTo(wrapperBox.x + wrapperBox.width, 0);
 		expect(statusBarBox.x + statusBarBox.width).toBeCloseTo(wrapperBox.x + wrapperBox.width, 0);
+		// The handle lives outside the add-column strip in the reserved lane now, so
+		// it sits PAST the wrapper's edge rather than exactly on it — see this
+		// file's own note on the outermost-lane change.
+		const stripBox = (await page.locator('.bt-edge-add-col').boundingBox())!;
+		expect(handleBox.x, 'the width handle should be outside the add-column strip').toBeGreaterThanOrEqual(stripBox.x + stripBox.width - 1);
+		expect(handleBox.x + handleBox.width).toBeLessThanOrEqual(rootBox.x + rootBox.width + 1);
 	});
 
 	test('on hover, the frame grows to cover the row/col selector strips and left toolbar, none of which spill outside it', async ({ page, renderFull }) => {
@@ -202,10 +199,19 @@ test.describe('outer frame', () => {
 		const statusBarBox = (await page.locator('.bt-status-bar').boundingBox())!;
 		expect(statusBarBox.x + statusBarBox.width).toBeCloseTo(frameBox.x + frameBox.width, 0);
 
+		// The two view-resize handles now live in the reserved right lane, in the
+		// OUTERMOST layer, just outside the add-column strip they share it with
+		// ([table][+ strip][handle][pane edge] — see .bt-edge-add-col's own CSS):
+		// they are no longer glued to the frame's right border, which is what this
+		// test used to check. What still has to hold is that they sit beyond the
+		// strip and inside root.
+		const stripBox = (await page.locator('.bt-edge-add-col').boundingBox())!;
 		const handleRBox = (await page.locator('.bt-view-resize-r').boundingBox())!;
-		expect(handleRBox.x + handleRBox.width).toBeCloseTo(frameBox.x + frameBox.width, 0);
+		expect(handleRBox.x, 'the width handle should be outside the add-column strip').toBeGreaterThanOrEqual(stripBox.x + stripBox.width - 1);
+		expect(handleRBox.x + handleRBox.width).toBeLessThanOrEqual(rootBox.x + rootBox.width + 1);
 		const handleBrBox = (await page.locator('.bt-view-resize-br').boundingBox())!;
-		expect(handleBrBox.x + handleBrBox.width).toBeCloseTo(frameBox.x + frameBox.width, 0);
+		expect(handleBrBox.x, 'the corner handle should be outside the add-column strip').toBeGreaterThanOrEqual(stripBox.x + stripBox.width - 1);
+		expect(handleBrBox.x + handleBrBox.width).toBeLessThanOrEqual(rootBox.x + rootBox.width + 1);
 
 		await expect.poll(() => page.locator('.bt-view-resize-r').evaluate(el => getComputedStyle(el, '::after').opacity)).toBe('1');
 	});
@@ -257,7 +263,7 @@ test.describe('outer frame', () => {
 	// hugs..." test above), not root's (the full page width). The handle, the
 	// frame, and the status bar all read the exact same edge — see
 	// updateOuterFrame's own comment on why.
-	test('the width handle sits at the auto-width table\'s real edge at rest, not root\'s wide page edge', async ({ page, renderFull }) => {
+	test('the width handle sits outside the add-column strip in the outermost lane at rest, not on root\'s wide page edge', async ({ page, renderFull }) => {
 		await renderFull(tableSource({ widths: [100, 100], rows: [{ 0: 'x', 1: 'y' }] }));
 		const root = page.locator('.bt-render-root');
 		const rootBox = (await root.boundingBox())!;
@@ -265,8 +271,13 @@ test.describe('outer frame', () => {
 		await page.waitForTimeout(50);
 
 		const frameBox = (await page.locator('.bt-outer-frame').boundingBox())!;
+		const stripBox = (await page.locator('.bt-edge-add-col').boundingBox())!;
 		const handleBox = (await page.locator('.bt-view-resize-r').boundingBox())!;
-		expect(handleBox.x + handleBox.width).toBeCloseTo(frameBox.x + frameBox.width, 0);
+		// Outside the strip the two share the reserved lane with, and inside root —
+		// no longer glued to the frame's own right border (see this file's other
+		// note on that change).
+		expect(handleBox.x, 'the width handle should be outside the add-column strip').toBeGreaterThanOrEqual(stripBox.x + stripBox.width - 1);
+		expect(handleBox.x + handleBox.width).toBeLessThanOrEqual(rootBox.x + rootBox.width + 1);
 		// The auto-width table is genuinely narrower than the page here — this
 		// assertion is only meaningful if root's own edge is somewhere else.
 		expect(frameBox.width).toBeLessThan(rootBox.width - 10);

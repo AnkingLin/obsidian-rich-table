@@ -126,8 +126,15 @@
 	 * so centered/narrow tables don't shift). Shifts the table right just enough to
 	 * expose the left strips instead of leaving them clipped off-screen. */
 	padding-left: var(--bt-sel-pad-left, 0px);
-	/* --bt-sel-pad-right: symmetric reservation for the right add-col (+) button on a
-	 * wide table whose right edge is flush against root (otherwise 0). */
+	/* --bt-sel-pad-right: the add-column (+) strip's own lane, reserved
+	 * PERMANENTLY for every table that has one (applyRightLaneReservation,
+	 * renderGeometry.ts) — the right-hand mirror of the left strips' reservation
+	 * above, so the table's right edge always keeps a fixed blank column beside
+	 * it instead of running into the pane's edge. Previously 0, which left the
+	 * table flush right and made the strip (an in-flow sticky sibling of the
+	 * table, so the wrapper's right edge is its own right edge) the only thing
+	 * between the table and the edge — reported as "列表右边应该跟左边一样固定
+	 * 留空". */
 	padding-right: var(--bt-sel-pad-right, 0px);
 	/* Every strip (ctrl column, row/col selectors, edge-add buttons) is position:absolute
 	 * with an offset computed to land INSIDE root's own box once the padding above is
@@ -382,9 +389,17 @@
  * 0` these always had. Glues the handle (and its dash below) to the frame's
  * true right edge instead of root's own, the same symmetry the height
  * handle already gets for free by living INSIDE the (now frame-width-
- * matching) status bar — see updateOuterFrame's own comment. */
-.bt-view-resize-r { top: 0; bottom: 0; right: var(--of-r-gap, 0px); width: 8px; cursor: ew-resize; }
-.bt-view-resize-br { right: var(--of-r-gap, 0px); bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+ * matching) status bar — see updateOuterFrame's own comment.
+ *
+ * --ac-right-gap (renderer.ts's positionEdgeStrips, edit mode only) overrides
+ * that when the add-column strip is present: the strip and this handle share
+ * the reserved right lane as [table][+ strip][handle], so the handle is placed
+ * just outside the strip rather than on top of it (reported: "把新增列按钮和
+ * 调整宽度条放到最外层" — both moved out of the scroller, side by side, in the
+ * outermost layer). Unset on a locked/read-only table, where no strip exists and
+ * the frame-hugging behaviour above is exactly right. */
+.bt-view-resize-r { top: 0; bottom: 0; right: var(--ac-right-gap, var(--of-r-gap, 0px)); width: 8px; cursor: ew-resize; }
+.bt-view-resize-br { right: var(--ac-right-gap, var(--of-r-gap, 0px)); bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
 /* Corner handle has no dash of its own (below) to recolor on hover, so it
  * keeps a small tint of its own — a 12x12px hotspot, not the full-edge
  * "long line" the -b/-r dash recoloring below replaces. */
@@ -1075,32 +1090,29 @@
  * on resize, not every scroll frame.
  *
  * Width is a constant 18px, not toggled to 0 at rest like an earlier version
- * of this rule did — that version's own reasoning ("a WIDTH change here
- * doesn't touch root's height, so it can't reintroduce the sheet-tab-bar-
- * jump problem a height toggle would... it's the same hover-reservation
- * pattern the row-selector/ctrl-column strips already use") missed that
- * this element, unlike those two, is a real in-flow flex CHILD of
- * .bt-table-content-row (position:absolute for the selector/ctrl-column
- * strips takes them out of flow entirely, so a size change on THEM can't
- * affect their container's own size at all — not true here). .content-row
- * is width:max-content and .bt-table-wrapper centers via margin-inline:auto,
- * so toggling this width still shifted the whole (centered) table sideways
- * on hover exactly like the height-toggle bug on the vertical axis — just
- * reported later, once that one was already fixed ("选择器先出来，此时表格
- * 没动，然后增加行列按钮出现，表格又左移了"). Reserving the width
- * permanently and only toggling visibility/opacity (the shared
- * .bt-edge-add-row/.bt-edge-add-col rule above) fixes it the same way the
- * permanent --bt-sel-pad reservation fixed the vertical case — visibility:
- * hidden still occupies its layout box, so nothing here ever needs to grow
- * on hover at all. */
+ * of this rule did. Reserving the width permanently and only toggling
+ * visibility/opacity (the shared .bt-edge-add-row/.bt-edge-add-col rule above)
+ * keeps hover from resizing anything — visibility: hidden still occupies its
+ * layout box.
+ *
+ * It now lives in the OUTERMOST layer — a root-level absolute overlay beside the
+ * table, like the left ctrl column/row selector and the view-width handles —
+ * rather than inside .bt-table-wrapper: inside the scroller it was pinned to the
+ * wrapper's visible edge by position:sticky, so whenever the table reached that
+ * edge the strip was pulled back on top of the last column (reported: "滚动到最
+ * 右边列表才和添加按钮不重叠"), and it shared its pixels with the view-width
+ * handle. Outside, it can neither scroll with the content nor be dragged onto
+ * the table, and it shares the reserved right lane (--bt-sel-pad-right) with the
+ * handle just outside it: [table][+ strip][width handle][pane edge]. --ac-left/
+ * -top/-height are written by renderer.ts's positionEdgeStrips (the same
+ * root-relative geometry every other overlay here uses). */
 .bt-edge-add-col {
-	position:   sticky;
+	position:   absolute;
 	cursor:     pointer;
-	top:        0;
-	right:      0;
-	align-self: flex-start;
+	left:       var(--ac-left, 0px);
+	top:        var(--ac-top, 0px);
 	width:      18px;
-	height:     var(--strip-height, 40px);
+	height:     var(--ac-height, 40px);
 	overflow:   hidden;
 }
 
