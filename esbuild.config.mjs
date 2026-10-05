@@ -268,7 +268,15 @@ const context = await esbuild.context({
 
 /** Append all src/themes/*.css into styles.css after each build.
  *  Truncates any previously appended themes section first so repeated builds
- *  don't accumulate stale CSS rules that can't be overridden. */
+ *  don't accumulate stale CSS rules that can't be overridden.
+ *
+ *  Line endings are normalized on read: on Windows (core.autocrlf=true) the
+ *  working copy is CRLF, so the block the PREVIOUS build appended is CRLF too,
+ *  while `separator` below is LF-only — indexOf() then silently missed it and
+ *  every second build appended a SECOND copy of every theme's CSS (measured:
+ *  3504-line file -> 3793 lines, two copies of the same marker, on this
+ *  machine). Normalizing first makes the strip, and the file written back,
+ *  independent of how the checkout spelled the line endings. */
 function appendThemeCSS() {
 	const themeDir = 'src/themes';
 	if (!fs.existsSync(themeDir)) return;
@@ -276,11 +284,11 @@ function appendThemeCSS() {
 	if (files.length === 0) return;
 	const separator = '\n\n/* ── Built-in themes (auto-generated — do not edit below) ──── */\n';
 	// Strip any previously appended themes block before re-appending.
-	let base = fs.readFileSync('styles.css', 'utf8');
+	let base = fs.readFileSync('styles.css', 'utf8').replace(/\r\n/g, '\n');
 	const cutIdx = base.indexOf(separator);
 	if (cutIdx !== -1) base = base.slice(0, cutIdx);
-	const css = base + separator + files.map(f => fs.readFileSync(path.join(themeDir, f), 'utf8')).join('\n');
-	fs.writeFileSync('styles.css', css);
+	const themes = files.map(f => fs.readFileSync(path.join(themeDir, f), 'utf8').replace(/\r\n/g, '\n')).join('\n');
+	fs.writeFileSync('styles.css', base + separator + themes);
 }
 
 if (gen) {

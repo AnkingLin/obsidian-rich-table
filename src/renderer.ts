@@ -2713,15 +2713,64 @@ export async function renderTable(
 			});
 		};
 
+		// ── Auto-layout column widths are pinned ONCE per rendered table ───────────
+		// rebuild() measures every column's rendered width (below) and needs those
+		// numbers as a px basis for the selector strips, the drag grips and the
+		// resize seams. Writing that measurement back onto <col>/<table> is
+		// therefore a read -> write feedback loop — and repeating it on EVERY
+		// rebuild (i.e. on every hover: shell mouseenter -> showSelectors ->
+		// rebuild, plus every selection change and bt-layout-changed) fed the loop
+		// back into itself. Whenever anything OUTSIDE this loop sizes the table —
+		// a theme/Obsidian `width` declaration the inline pin can't beat in the
+		// cascade, .bt-table-content-row's own width:max-content, an auto-layout
+		// MIN wider than the pinned columns, the table's own border/padding — the
+		// next measurement came back bigger (or smaller) by that same delta and
+		// got pinned as the new floor, indefinitely. Measured: an `!important`
+		// width rule on the table grew it +40px per hover; the grid theme's cell
+		// borders shrank it -8px per hover; `.bt-table{padding:10px}` shrank it
+		// -40px per hover; a reported 2-column table rendered at
+		// usedWidth = pinnedWidth + 18 and gained +108px per hover, always split
+		// between its columns in proportion to their widths.
+		//
+		// One pin IS still needed: with no explicit width at all, auto-layout
+		// reads contentRow's open-ended max-content as room and manufactures
+		// extra table width (the original report this pin was added for). So:
+		// pin on the first rebuild of this rendered table, never rewrite it
+		// afterwards. Later rebuilds still measure, and use that fresh
+		// measurement for POSITIONING (measuredColWidth) — so a column whose
+		// content genuinely forced itself wider keeps its letters and seams in
+		// the right place — they just never feed it back into the geometry that
+		// produced it. A genuine content change re-renders the whole table
+		// (tableBlock.ts's write-back), which starts a fresh instance with no
+		// pin, so nothing here goes stale across an edit.
+		let autoPinTotal: number | null = null;
+		const measuredColWidth = new Map<number, number>();
+
+		// The width every strip/handle position in rebuild() is computed from.
+		// Auto layout: this layout's own measurement (see autoPinTotal above) —
+		// NOT <col>'s style width, which is only a one-time snapshot and would
+		// put the letters/seams where the table used to be. Explicit/fixed
+		// layout: <col>'s style width, set at render time (renderer.ts's colgroup
+		// build, or applyAutoColWidths for a col[data-auto] in a mixed table).
+		const colWidthForLayout = (colEl: HTMLElement): number => {
+			const ci = colEl.dataset.col;
+			if (ci !== undefined) {
+				const measured = measuredColWidth.get(parseInt(ci));
+				if (measured !== undefined) return measured;
+			}
+			return parseFloat(colEl.style.width) || 0;
+		};
+
 		const rebuild = () => {
 			updateTableHighlights();
 
 			// In auto layout (no explicit widths, e.g. the empty-block template) the <col>
 			// elements never get a width set at render time — see hasExplicitWidths above —
-			// so every offset computed below from col.style.width would read 0 and collapse
-			// the selector/resize-seam positions to the left edge. Measure each physical
-			// column's actual rendered width from an unspanned header/data cell and pin it
-			// onto the <col> so the existing col.style.width reads further down stay correct.
+			// so the selector/resize-seam positions below would have no px width to work
+			// from. Measure each physical column's actual rendered width from an unspanned
+			// header/data cell: those measurements feed colWidthForLayout (the one px basis
+			// every positioning consumer below reads) AND, exactly once per rendered table,
+			// the pin autoPinTotal documents.
 			if (!hasExplicitWidths) {
 				const measured = new Map<string, number>();
 				// A column that's colspan-merged in EVERY row it appears in (e.g. a
@@ -2759,12 +2808,20 @@ export async function renderTable(
 						if (!measured.has(key)) measured.set(key, share);
 					}
 				}
+				const firstPin = autoPinTotal === null;
 				let pinnedTotal = 0;
 				for (const c of ownCols(table)) {
 					const ci = c.dataset.col;
 					if (ci === undefined) continue;
 					const w = measured.get(ci);
-					if (w !== undefined) { c.style.setProperty('width', `${w}px`); pinnedTotal += w; }
+					if (w === undefined) continue;
+					pinnedTotal += w;
+					// Idempotence guard on top of the once-only rule: a value that
+					// already matches must not touch style at all (every write here
+					// invalidates layout and re-fires the ResizeObservers).
+					if (firstPin && Math.abs(w - (parseFloat(c.style.width) || 0)) > 0.5) {
+						c.style.setProperty('width', `${w}px`);
+					}
 				}
 				// Also pin the TABLE's own width to the just-measured total — table-
 				// layout stays 'auto' (unlike the hasExplicitWidths branch above,
@@ -2789,15 +2846,29 @@ export async function renderTable(
 				// behavior for real overflow), but stops manufacturing UNNEEDED
 				// extra space just because a flex ancestor's max-content query
 				// left the door open.
-				if (pinnedTotal > 0) table.style.setProperty('width', `${pinnedTotal}px`);
+				//
+				// Written ONCE (firstPin / autoPinTotal above): every later write
+				// re-reads whatever this same loop just produced, so a table whose
+				// real size is governed by something else outside this loop
+				// ratchets by that difference on every hover instead of settling.
+				if (firstPin && pinnedTotal > 0) {
+					table.style.setProperty('width', `${pinnedTotal}px`);
+					autoPinTotal = pinnedTotal;
+				}
+				// Positioning widths for THIS layout — see colWidthForLayout above.
+				// Populated on every rebuild, never only on the pin: this is what
+				// keeps the strips and seams on the columns the user can actually
+				// see, even when something outside this loop sized them.
+				measuredColWidth.clear();
+				for (const [ci, w] of measured) measuredColWidth.set(parseInt(ci), w);
 			}
 
 			// Column selector — cells positioned by --cl/--cw relative to the selector's
 			// own left edge, which CSS Grid aligns with the table wrapper automatically.
 			colSel.querySelectorAll('.bt-sel-cell, .bt-sel-col-drag').forEach(e => e.remove());
 
-			// parseFloat, not parseInt: col.style.width holds a fractional px value
-			// (rebuild()'s own measurement above pins e.g. "39.9952px" for an
+			// parseFloat, not parseInt: colWidthForLayout returns a fractional px
+			// value (rebuild()'s own measurement, e.g. "39.9952px" for an
 			// auto-layout column) — parseInt truncates that to "39", and doing so
 			// on every column in a cumulative running sum compounds the ~1px loss
 			// per column into a growing drift, reported as the selector strip's
@@ -2819,7 +2890,7 @@ export async function renderTable(
 			const freezeCols = model.freezeCols !== undefined && canFreezeCols(model, model.freezeCols) ? model.freezeCols : undefined;
 			const freezeRows = model.freezeRows !== undefined && canFreezeRows(model, model.freezeRows) ? model.freezeRows : undefined;
 			for (const c of ownCols(table)) {
-				const w = parseFloat(c.style.width) || 0;
+				const w = colWidthForLayout(c);
 				if (c.dataset.col !== undefined) {
 					// Visible column — one cell per physical column
 					const ci = parseInt(c.dataset.col);
@@ -2987,7 +3058,7 @@ export async function renderTable(
 				// extension of that line.
 				const colFrozen = freezeCols !== undefined && parseInt(dc) < freezeCols;
 				// Seam sits on the column's RIGHT edge; same frozen/non-frozen split as --cl above.
-				h.setCssProps({ '--rx': `${selectorAxisOffset(c, 'x', zoom, colFrozen) + (parseFloat(c.style.width) || 0)}px` });
+				h.setCssProps({ '--rx': `${selectorAxisOffset(c, 'x', zoom, colFrozen) + colWidthForLayout(c)}px` });
 				h.toggleClass('bt-sel-cell-frozen', colFrozen);
 				const colDesiredParent = colFrozen ? colSel : colTrack;
 				if (h.parentElement !== colDesiredParent) colDesiredParent.appendChild(h);
